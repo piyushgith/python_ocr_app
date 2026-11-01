@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OCR Platform</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <h1>OCR Platform</h1>
+    <p>English · French · Arabic — runs locally on CPU. <a href="/docs">API docs</a></p>
+  </header>
+
+  <main>
+    <section class="panel" aria-labelledby="upload-title">
+      <h2 id="upload-title">1. Document</h2>
+      <label id="dropzone" class="dropzone" tabindex="0">
+        <input id="file-input" type="file" hidden
+               accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.pdf,.docx,.txt">
+        <strong>Drop a file here or click to choose</strong>
+        <span class="muted">PNG, JPG, TIFF, BMP, WEBP, PDF, DOCX, TXT · max <span id="max-size">25 MB</span></span>
+      </label>
+      <dl id="file-info" class="file-info" hidden>
+        <dt>Name</dt><dd id="info-name"></dd>
+        <dt>Size</dt><dd id="info-size"></dd>
+        <dt>Type</dt><dd id="info-type"></dd>
+      </dl>
+    </section>
+
+    <section class="panel" aria-labelledby="config-title">
+      <h2 id="config-title">2. Options</h2>
+      <div class="grid">
+        <label>OCR engine
+          <select id="engine">
+            <option value="auto">auto (PaddleOCR)</option>
+            <option value="paddleocr">PaddleOCR</option>
+            <option value="tesseract">Tesseract (optional)</option>
+          </select>
+        </label>
+        <label>Processing mode
+          <select id="mode">
+            <option value="auto">auto — native text, OCR where needed</option>
+            <option value="native">native — embedded text only</option>
+            <option value="ocr">ocr — always OCR</option>
+          </select>
+        </label>
+        <label>Output format
+          <select id="output-format">
+            <option value="json">JSON</option>
+            <option value="text">Text</option>
+          </select>
+        </label>
+        <fieldset>
+          <legend>Languages</legend>
+          <label class="inline"><input type="checkbox" name="language" value="en" checked> English</label>
+          <label class="inline"><input type="checkbox" name="language" value="fr"> Français</label>
+          <label class="inline"><input type="checkbox" name="language" value="ar"> العربية</label>
+        </fieldset>
+      </div>
+      <p class="muted small">Automatic language detection is not available; select the languages in the document.
+        Selecting Arabic uses the Arabic model, which also reads Latin text and digits.</p>
+      <div class="actions">
+        <button id="extract" type="button" disabled>Extract</button>
+        <button id="reset" type="button" class="secondary">Clear</button>
+      </div>
+    </section>
+
+    <section id="status" class="panel" hidden aria-live="polite">
+      <div id="status-text"></div>
+      <progress id="progress" max="1" value="0" hidden></progress>
+    </section>
+
+    <section id="error" class="panel error" hidden role="alert">
+      <strong id="error-code"></strong>
+      <p id="error-message"></p>
+    </section>
+
+    <section id="results" class="panel" hidden aria-labelledby="results-title">
+      <h2 id="results-title">3. Results</h2>
+      <div id="warnings" class="warnings" hidden></div>
+      <p id="result-summary" class="muted small"></p>
+
+      <div class="toolbar">
+        <div class="tabs" role="tablist">
+          <button role="tab" data-tab="text" aria-selected="true">Text</button>
+          <button role="tab" data-tab="json" aria-selected="false">JSON</button>
+          <button role="tab" data-tab="pages" aria-selected="false">Pages</button>
+        </div>
+        <div class="pager" id="pager">
+          <button id="prev" type="button" class="secondary" aria-label="Previous page">‹</button>
+          <span>Page <span id="page-label">1 / 1</span></span>
+          <button id="next" type="button" class="secondary" aria-label="Next page">›</button>
+        </div>
+        <div class="downloads">
+          <button id="download-txt" type="button" class="secondary">Download TXT</button>
+          <button id="download-json" type="button" class="secondary">Download JSON</button>
+        </div>
+      </div>
+
+      <div id="tab-text" class="tab-body"><div id="text-view" class="text-view"></div></div>
+      <div id="tab-json" class="tab-body" hidden><pre id="json-view" dir="ltr"></pre></div>
+      <div id="tab-pages" class="tab-body" hidden><div id="pages-view"></div></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

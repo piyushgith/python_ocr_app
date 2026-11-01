@@ -1,0 +1,12 @@
+services:
+  ocr:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      OCR_MODEL_CACHE_DIR: /models
+    volumes:
+      - ocr-models:/models
+
+volumes:
+  ocr-models:

@@ -1,0 +1,23 @@
+{
+  "texts": {
+    "english": [
+      "Loan application number 2024-00123",
+      "Applicant: John Smith",
+      "Total amount due: $12,500.00"
+    ],
+    "french": [
+      "Relevé de compte bancaire",
+      "Échéance le 15 février : 1 250,75 €",
+      "Café crème à Noël, où êtes-vous ?"
+    ],
+    "arabic": [
+      "مرحبا بكم في البنك الوطني",
+      "كشف حساب شهر يناير",
+      "رقم الحساب 123456789"
+    ],
+    "mixed_arabic_latin": [
+      "Invoice رقم 2024 مبلغ 1500 USD",
+      "العميل: Ahmed Hassan"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+
+# Downloaded OCR models
+models/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Scratch
+tmp/
+*.log

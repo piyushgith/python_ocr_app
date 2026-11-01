@@ -1,0 +1,134 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1c2430;
+  --muted: #5f6b7a;
+  --border: #d5dae1;
+  --accent: #1f5fbf;
+  --accent-text: #ffffff;
+  --error-bg: #fdecec;
+  --error-text: #8a1c1c;
+  --warn-bg: #fff6df;
+  --warn-text: #6b4b00;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c;
+    --panel: #1b212a;
+    --text: #e6eaf0;
+    --muted: #9aa6b5;
+    --border: #2f3844;
+    --accent: #5b9dff;
+    --accent-text: #0b1220;
+    --error-bg: #3a1c1c;
+    --error-text: #ffb4b4;
+    --warn-bg: #3a2f12;
+    --warn-text: #ffd98a;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 1rem 3rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header, main { max-width: 960px; margin: 0 auto; }
+header { padding: 1.5rem 0 0.5rem; }
+h1 { margin: 0; font-size: 1.5rem; }
+h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+a { color: var(--accent); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-top: 1rem;
+}
+
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 2rem 1rem;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  text-align: center;
+  cursor: pointer;
+}
+.dropzone:hover, .dropzone:focus-visible, .dropzone.dragover { border-color: var(--accent); outline: none; }
+
+.file-info { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 1rem 0 0; }
+.file-info dt { color: var(--muted); }
+.file-info dd { margin: 0; overflow-wrap: anywhere; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 500; }
+label.inline { flex-direction: row; align-items: center; gap: 0.4rem; font-weight: normal; }
+fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0; padding: 0.4rem 0.75rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+legend { padding: 0 0.25rem; font-weight: 500; }
+
+select, button {
+  font: inherit;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+}
+button { background: var(--accent); color: var(--accent-text); border-color: var(--accent); cursor: pointer; }
+button.secondary { background: var(--panel); color: var(--text); border-color: var(--border); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+
+progress { width: 100%; margin-top: 0.5rem; }
+
+.error { background: var(--error-bg); color: var(--error-text); border-color: var(--error-text); }
+.error p { margin: 0.25rem 0 0; }
+
+.warnings { background: var(--warn-bg); color: var(--warn-text); border-radius: 6px; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; }
+.warnings ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; justify-content: space-between; margin: 0.5rem 0 0.75rem; }
+.tabs, .pager, .downloads { display: flex; gap: 0.4rem; align-items: center; }
+.tabs button { background: var(--panel); color: var(--text); border-color: var(--border); }
+.tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+
+.text-view, pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  max-height: 28rem;
+  overflow: auto;
+  margin: 0;
+  font-size: 0.95rem;
+}
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85rem; }
+
+/* Each line picks its own direction so Arabic lines render right-to-left and Latin lines left-to-right. */
+.line { unicode-bidi: plaintext; text-align: start; white-space: pre-wrap; min-height: 1.5em; }
+
+.table-wrap { overflow-x: auto; margin-top: 0.5rem; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { border: 1px solid var(--border); padding: 0.3rem 0.5rem; text-align: start; vertical-align: top; }
+td.cell-text { unicode-bidi: plaintext; }
+td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 560px) {
+  .toolbar { flex-direction: column; align-items: stretch; }
+  .tabs, .pager, .downloads { justify-content: space-between; }
+}
