@@ -1,5 +1,8 @@
 import time
 
+import pytest
+
+from app.schemas.ocr import ExtractionOptions
 from tests.conftest import FakeEngine, build_client
 
 
@@ -36,7 +39,7 @@ def test_engines_lists_availability_and_hides_unusable_languages(client):
     assert engines["tesseract"]["available"] is False
     assert engines["tesseract"]["supported_languages"] == []
     assert "not found" in engines["tesseract"]["warnings"][0]
-    assert body["language_detection"] is False
+    assert body["language_detection"] is True
 
 
 def test_extract_json_matches_the_documented_schema(client, samples):
@@ -95,6 +98,41 @@ def test_file_over_limit_is_rejected(tmp_path, samples):
 
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "FILE_TOO_LARGE"
+
+
+def test_omitted_languages_are_detected_and_returned(client, samples):
+    body = client.post("/api/v1/ocr/extract", files=upload(samples, "document.docx")).json()
+
+    assert body["extraction"]["requested_languages"] == []
+    assert body["extraction"]["detected_languages"] == ["en"]
+
+
+def test_sync_extraction_over_the_concurrency_limit_is_429(tmp_path, samples):
+    with build_client(tmp_path, sync_max_active=1) as small_client:
+        slots = small_client.app.state.sync_slots
+        slots.acquire()
+        try:
+            busy = small_client.post("/api/v1/ocr/extract", files=upload(samples, "english.png"))
+            busy_batch = small_client.post("/api/v1/ocr/batch", files=[("files", ("e.png", (samples / "english.png").read_bytes()))])
+        finally:
+            slots.release()
+        free = small_client.post("/api/v1/ocr/extract", files=upload(samples, "english.png"))
+
+    assert busy.status_code == busy_batch.status_code == 429
+    assert busy.json()["error"]["code"] == "TOO_MANY_REQUESTS"
+    assert free.status_code == 200
+
+
+def test_oversized_upload_rejection_carries_cors_headers(tmp_path):
+    with build_client(tmp_path, max_upload_mb=1, cors_origins=["http://allowed.example"]) as cors_client:
+        response = cors_client.post(
+            "/api/v1/ocr/extract",
+            content=b"x",
+            headers={"content-length": str(10 * 1024 * 1024), "origin": "http://allowed.example"},
+        )
+
+    assert response.status_code == 413
+    assert response.headers["access-control-allow-origin"] == "http://allowed.example"
 
 
 def test_unsupported_language_is_a_422_with_error_schema(client, samples):
@@ -217,6 +255,45 @@ def test_active_job_count_is_bounded(tmp_path, samples):
         assert first.status_code == 202
         assert second.status_code == 429
         wait_for_job(small_client, first.json()["job_id"])
+
+
+def test_stored_jobs_are_capped_by_dropping_the_oldest_finished(tmp_path, samples):
+    with build_client(tmp_path, job_max_stored=2) as small_client:
+        job_ids = []
+        for _ in range(3):
+            job_ids.append(small_client.post("/api/v1/ocr/jobs", files=upload(samples, "english.png")).json()["job_id"])
+            wait_for_job(small_client, job_ids[-1])
+
+        statuses = [small_client.get(f"/api/v1/ocr/jobs/{job_id}").status_code for job_id in job_ids]
+
+    assert statuses == [404, 200, 200]
+
+
+def test_job_killed_by_a_base_exception_is_marked_failed(tmp_path, samples, monkeypatch):
+    with build_client(tmp_path) as test_client:
+        def crash(*_args, **_kwargs):
+            raise SystemExit("worker stopped")
+
+        monkeypatch.setattr(test_client.app.state.processor, "process", crash)
+        job_id = test_client.post("/api/v1/ocr/jobs", files=upload(samples, "english.png")).json()["job_id"]
+
+        job = wait_for_job(test_client, job_id)
+
+    assert job["status"] == "failed"
+    assert job["error"]["code"] == "INTERNAL_ERROR"
+
+
+def test_job_not_accepted_by_the_executor_is_not_stored(tmp_path):
+    with build_client(tmp_path) as test_client:
+        jobs = test_client.app.state.jobs
+        jobs._executor.shutdown()
+        workdir = tmp_path / "job"
+        workdir.mkdir()
+
+        with pytest.raises(RuntimeError):
+            jobs.submit(workdir, "e.png", ExtractionOptions())
+
+        assert jobs._jobs == {}
 
 
 def test_expired_jobs_are_removed(tmp_path, samples):

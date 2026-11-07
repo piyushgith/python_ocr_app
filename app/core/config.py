@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     batch_max_files: int = 5
     job_ttl_seconds: int = 3600
     job_max_active: int = 20
+    job_max_stored: int = 100
+    sync_max_active: int = 10
     model_cache_dir: Path = Path("models")
     tesseract_cmd: str = "tesseract"
     cors_origins: list[str] = []

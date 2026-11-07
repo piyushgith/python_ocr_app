@@ -1,6 +1,7 @@
 import logging
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -39,7 +40,7 @@ ERROR_RESPONSES = {
         413: "File, page count or image size over the configured limit",
         415: "Unsupported file type",
         422: "Corrupted document, unsupported language or mode, invalid options",
-        429: "Too many active jobs",
+        429: "Too many active jobs or synchronous extractions",
         500: "OCR failed",
         503: "OCR engine or model unavailable",
         504: "Processing timeout",
@@ -51,7 +52,10 @@ MODE_HELP = (
     "native: embedded/editable text only, never OCR. "
     "ocr: always OCR images and PDF pages (a PDF page's embedded text is kept in `native_text`)."
 )
-LANGUAGES_HELP = "Language codes en, fr, ar. Repeat the field or comma-separate (en,fr). Default: en."
+LANGUAGES_HELP = (
+    "Language codes en, fr, ar. Repeat the field or comma-separate (en,fr). "
+    "Omit to detect the language from the document; the result is in `extraction.detected_languages`."
+)
 
 
 def get_processor(request: Request) -> DocumentProcessor:
@@ -66,9 +70,21 @@ def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+@contextmanager
+def sync_slot(request: Request):
+    """Holds one of the sync_max_active slots for a synchronous extraction. Raises 429 when none is free."""
+    slots = request.app.state.sync_slots
+    if not slots.acquire(blocking=False):
+        raise AppError("TOO_MANY_REQUESTS", "Too many extractions are running. Retry later or use /jobs.", 429)
+    try:
+        yield
+    finally:
+        slots.release()
+
+
 def extraction_options(
     engine: EngineChoice = Form(EngineChoice.auto, description="OCR engine. auto = paddleocr, else tesseract if installed."),
-    languages: list[str] = Form(["en"], description=LANGUAGES_HELP),
+    languages: list[str] = Form([], description=LANGUAGES_HELP),
     mode: Mode = Form(Mode.auto, description=MODE_HELP),
 ) -> ExtractionOptions:
     return ExtractionOptions(engine=engine, languages=languages, mode=mode)
@@ -86,13 +102,14 @@ def list_engines(processor: DocumentProcessor = Depends(get_processor)) -> Engin
     summary="Extract one document synchronously",
 )
 async def extract(
+    request: Request,
     file: UploadFile = File(..., description="PNG, JPEG, TIFF, BMP, WEBP, PDF, DOCX or TXT"),
     output_format: OutputFormat = Form(OutputFormat.json, description="json: structured result. text: plain text."),
     options: ExtractionOptions = Depends(extraction_options),
     processor: DocumentProcessor = Depends(get_processor),
     settings: Settings = Depends(get_settings),
 ):
-    with tempfile.TemporaryDirectory(prefix="ocr-") as workdir:
+    with sync_slot(request), tempfile.TemporaryDirectory(prefix="ocr-") as workdir:
         path = Path(workdir) / "upload.bin"
         await save_upload(file, path, settings.max_upload_bytes)
         result = await run_in_threadpool(processor.process, path, sanitize_filename(file.filename), options)
@@ -111,6 +128,7 @@ async def extract(
     summary="Extract several documents; each file succeeds or fails on its own",
 )
 async def batch(
+    request: Request,
     files: list[UploadFile] = File(..., description="Up to OCR_BATCH_MAX_FILES files"),
     options: ExtractionOptions = Depends(extraction_options),
     processor: DocumentProcessor = Depends(get_processor),
@@ -121,27 +139,28 @@ async def batch(
     normalize_languages(options.languages)
 
     items = []
-    for upload in files:
-        filename = sanitize_filename(upload.filename)
-        with tempfile.TemporaryDirectory(prefix="ocr-") as workdir:
-            path = Path(workdir) / "upload.bin"
-            try:
-                await save_upload(upload, path, settings.max_upload_bytes)
-                result = await run_in_threadpool(processor.process, path, filename, options)
-                items.append(BatchItem(filename=filename, status="completed", result=result))
-            except AppError as error:
-                items.append(
-                    BatchItem(filename=filename, status="failed", error=ErrorBody(code=error.code, message=error.message))
-                )
-            except Exception:
-                logger.exception("Batch item failed unexpectedly")
-                items.append(
-                    BatchItem(
-                        filename=filename,
-                        status="failed",
-                        error=ErrorBody(code="INTERNAL_ERROR", message="Unexpected error while processing the document."),
+    with sync_slot(request):
+        for upload in files:
+            filename = sanitize_filename(upload.filename)
+            with tempfile.TemporaryDirectory(prefix="ocr-") as workdir:
+                path = Path(workdir) / "upload.bin"
+                try:
+                    await save_upload(upload, path, settings.max_upload_bytes)
+                    result = await run_in_threadpool(processor.process, path, filename, options)
+                    items.append(BatchItem(filename=filename, status="completed", result=result))
+                except AppError as error:
+                    items.append(
+                        BatchItem(filename=filename, status="failed", error=ErrorBody(code=error.code, message=error.message))
                     )
-                )
+                except Exception:
+                    logger.exception("Batch item failed unexpectedly")
+                    items.append(
+                        BatchItem(
+                            filename=filename,
+                            status="failed",
+                            error=ErrorBody(code="INTERNAL_ERROR", message="Unexpected error while processing the document."),
+                        )
+                    )
     return BatchResponse(items=items)
 
 

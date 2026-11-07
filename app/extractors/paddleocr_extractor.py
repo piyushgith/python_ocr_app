@@ -59,6 +59,13 @@ class PaddleOcrEngine(OcrEngine):
             return []
         return [f"No models cached in '{self._model_cache_dir}'. The first OCR request downloads them."]
 
+    def detection_languages(self) -> list[str]:
+        """The Arabic model, because it reads both Arabic and Latin text."""
+        return ["ar"]
+
+    def needs_reread(self, probe_languages: list[str], detected_languages: list[str]) -> bool:
+        return self._paddle_lang(probe_languages) != self._paddle_lang(detected_languages)
+
     def recognize(self, image: Image.Image, languages: list[str]) -> list[OcrBlock]:
         pixels = np.asarray(image.convert("RGB"))
         with self._lock:

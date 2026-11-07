@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageOps
 
 from app.core.config import Settings
@@ -7,6 +8,8 @@ from app.core.errors import AppError, corrupted_document
 
 # Pillow's built-in decompression-bomb check is replaced by the explicit max_image_pixels check below.
 Image.MAX_IMAGE_PIXELS = None
+
+SIXTEEN_BIT_MODES = ("I;16", "I;16L", "I;16B")
 
 
 def open_image(path: Path, settings: Settings) -> Image.Image:
@@ -31,6 +34,9 @@ def load_frame(image: Image.Image, index: int, settings: Settings) -> Image.Imag
         image.seek(index)
         _check_pixels(image, settings)
         frame = ImageOps.exif_transpose(image)
+        if frame.mode in SIXTEEN_BIT_MODES:
+            # Pillow clips 16-bit values to 255 when converting; scale them to 8 bits instead.
+            frame = Image.fromarray((np.asarray(frame) // 256).astype(np.uint8))
         if frame.mode in ("RGBA", "LA") or (frame.mode == "P" and "transparency" in frame.info):
             rgba = frame.convert("RGBA")
             frame = Image.new("RGB", rgba.size, "white")

@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import docx
@@ -122,6 +123,39 @@ class TestPdf:
 
         assert error.value.code == "TIMEOUT"
 
+    def test_a_single_slow_page_is_stopped_at_the_deadline(self, tmp_path, samples):
+        engine = FakeEngine(delay=3)
+        processor, _ = make_processor(tmp_path, engine=engine, processing_timeout_seconds=1)
+        started = time.monotonic()
+
+        with pytest.raises(AppError) as error:
+            processor.process(samples / "english.png", "e.png", options())
+
+        assert error.value.code == "TIMEOUT"
+        assert time.monotonic() - started < 2.5
+
+    def test_missing_engine_fails_before_native_pages_are_processed(self, tmp_path, samples):
+        broken_paddle = FakeEngine(languages=frozenset(), problems=["PaddleOCR is not installed."])
+        processor, _ = make_processor(tmp_path, engine=broken_paddle)
+        reported = []
+
+        with pytest.raises(AppError) as error:
+            processor.process(samples / "mixed.pdf", "mixed.pdf", options(), lambda done, total: reported.append(done))
+
+        assert error.value.code == "ENGINE_UNAVAILABLE"
+        assert reported == []
+
+    def test_native_bbox_of_text_running_off_the_page_stays_within_0_and_1(self, tmp_path):
+        processor, _ = make_processor(tmp_path)
+        pdf = tmp_path / "edge.pdf"
+        document = pymupdf.open()
+        document.new_page().insert_text((450, 100), "Text running past the right edge of the page", fontname="helv", fontsize=12)
+        document.save(pdf)
+
+        result = processor.process(pdf, "edge.pdf", options())
+
+        assert all(0 <= value <= 1 for value in result.pages[0].blocks[0].bbox)
+
     def test_progress_is_reported_per_page(self, tmp_path, samples):
         processor, _ = make_processor(tmp_path)
         reported = []
@@ -187,6 +221,21 @@ class TestImage:
 
         assert [page.page_number for page in result.pages] == [1, 2]
         assert len(engine.calls) == 2
+
+    def test_16_bit_grayscale_is_scaled_not_clipped(self, tmp_path):
+        import numpy as np
+        from PIL import Image
+
+        from app.services import image_service
+
+        path = tmp_path / "scan16.png"
+        Image.fromarray(np.full((10, 10), 40000, dtype=np.uint16)).save(path)
+        settings = Settings(model_cache_dir=tmp_path)
+        image = image_service.open_image(path, settings)
+
+        frame = image_service.load_frame(image, 0, settings)
+
+        assert frame.getpixel((0, 0)) == (156, 156, 156)
 
 
 class TestDocxAndText:
@@ -324,6 +373,85 @@ class TestEngineSelection:
         assert result.pages[0].text == ""
         assert result.pages[1].text == "FAKE OCR TEXT"
         assert result.warnings == ["Page 1: boom"]
+
+
+class ProbingEngine(FakeEngine):
+    """Mimics PaddleOCR: probes with the Arabic model and needs a re-read when the text is not Arabic."""
+
+    def detection_languages(self):
+        return ["ar"]
+
+    def needs_reread(self, probe_languages, detected_languages):
+        return ("ar" in probe_languages) != ("ar" in detected_languages)
+
+
+class TestLanguageDetection:
+    def test_native_text_language_is_detected_when_none_requested(self, tmp_path):
+        processor, engine = make_processor(tmp_path)
+        pdf = text_pdf(tmp_path / "a.pdf", ["Relevé de compte: échéance du prêt le 15 février, merci."])
+
+        result = processor.process(pdf, "a.pdf", options(languages=()))
+
+        assert engine.calls == []
+        assert result.extraction.requested_languages == []
+        assert result.extraction.detected_languages == ["fr"]
+
+    def test_requested_languages_skip_detection(self, tmp_path):
+        processor, _ = make_processor(tmp_path)
+        pdf = text_pdf(tmp_path / "a.pdf", ["Relevé de compte: échéance du prêt le 15 février, merci."])
+
+        result = processor.process(pdf, "a.pdf", options(languages=("en",)))
+
+        assert result.extraction.detected_languages is None
+
+    def test_latin_scan_is_probed_then_reread_with_the_detected_model(self, tmp_path, samples):
+        engine = ProbingEngine(text="First paragraph of the loan agreement between the bank and the customer.")
+        processor, _ = make_processor(tmp_path, engine=engine)
+
+        result = processor.process(samples / "scanned.pdf", "s.pdf", options(languages=()))
+
+        assert [languages for _, languages in engine.calls] == [["ar"], ["en"], ["en"]]
+        assert result.extraction.detected_languages == ["en"]
+
+    def test_arabic_scan_keeps_the_probe_result(self, tmp_path, samples):
+        engine = ProbingEngine(text="مرحبا بكم في البنك الوطني، كشف الحساب الشهري")
+        processor, _ = make_processor(tmp_path, engine=engine)
+
+        result = processor.process(samples / "scanned.pdf", "s.pdf", options(languages=()))
+
+        assert [languages for _, languages in engine.calls] == [["ar"], ["ar"]]
+        assert result.extraction.detected_languages == ["ar"]
+
+    def test_engine_reading_all_languages_keeps_them_for_every_page(self, tmp_path, samples):
+        engine = FakeEngine(text="First paragraph of the loan agreement between the bank and the customer.")
+        processor, _ = make_processor(tmp_path, engine=engine)
+
+        processor.process(samples / "scanned.pdf", "s.pdf", options(languages=()))
+
+        assert [languages for _, languages in engine.calls] == [["ar", "en", "fr"], ["ar", "en", "fr"]]
+
+    def test_every_language_of_a_multilingual_document_is_reported(self, tmp_path):
+        processor, _ = make_processor(tmp_path)
+        pdf = text_pdf(
+            tmp_path / "a.pdf",
+            [
+                "First paragraph of the loan agreement between the bank and the customer, signed today.",
+                "Relevé de compte: échéance du prêt le 15 février.",
+            ],
+        )
+
+        result = processor.process(pdf, "a.pdf", options(languages=()))
+
+        assert result.extraction.detected_languages == ["en", "fr"]
+
+    def test_too_little_text_keeps_probing_and_reports_nothing(self, tmp_path, samples):
+        engine = ProbingEngine(text="OK")
+        processor, _ = make_processor(tmp_path, engine=engine)
+
+        result = processor.process(samples / "scanned.pdf", "s.pdf", options(languages=()))
+
+        assert [languages for _, languages in engine.calls] == [["ar"], ["ar"]]
+        assert result.extraction.detected_languages == []
 
 
 def test_text_rendering_has_predictable_page_separators(tmp_path, samples):

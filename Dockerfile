@@ -6,9 +6,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv/ocr
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements-lock.txt ./
 COPY app ./app
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -c requirements-lock.txt .
 
 ENV OCR_MODEL_CACHE_DIR=/models
 VOLUME /models

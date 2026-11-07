@@ -1,6 +1,9 @@
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from PIL import Image
@@ -22,6 +25,7 @@ from app.schemas.ocr import (
     Table,
 )
 from app.services import image_service, office_service, pdf_service
+from app.services.language_service import detect_languages, language_letter_counts
 from app.utils.files import IMAGE_FORMATS, MIME_TYPES, SUPPORTED_FORMAT_LABELS, DocFormat, detect_format
 
 logger = logging.getLogger(__name__)
@@ -34,7 +38,7 @@ ProgressCallback = Callable[[int, int], None]
 
 
 def normalize_languages(requested: list[str]) -> list[str]:
-    """Lower-cases, splits comma-separated values, removes duplicates. Defaults to English."""
+    """Lower-cases, splits comma-separated values, removes duplicates. Empty means detect the language."""
     languages: list[str] = []
     for value in requested:
         for code in value.split(","):
@@ -48,7 +52,7 @@ def normalize_languages(requested: list[str]) -> list[str]:
             f"Unsupported language(s): {', '.join(unknown)}. Supported: {', '.join(SUPPORTED_LANGUAGES)}.",
             422,
         )
-    return languages or ["en"]
+    return languages
 
 
 def render_text(result: ExtractionResult) -> str:
@@ -59,13 +63,25 @@ def render_text(result: ExtractionResult) -> str:
 
 
 class _OcrSession:
-    """Resolves the OCR engine on first need and counts page failures for one document."""
+    """Resolves the OCR engine on first need, picks the OCR languages and counts page failures for one document.
 
-    def __init__(self, processor: "DocumentProcessor", options: ExtractionOptions, languages: list[str], warnings: list[str]):
+    With no requested languages, pages are read with the engine's detection languages. When the detected language
+    needs another model, that page is re-read with it and later pages use it directly.
+    """
+
+    def __init__(
+        self,
+        processor: "DocumentProcessor",
+        options: ExtractionOptions,
+        languages: list[str],
+        warnings: list[str],
+        deadline: float,
+    ):
         self._processor = processor
         self._options = options
         self._languages = languages
         self._warnings = warnings
+        self._deadline = deadline
         self._engine: OcrEngine | None = None
         self.pages_attempted = 0
         self.pages_failed = 0
@@ -88,7 +104,7 @@ class _OcrSession:
     def recognize_page(self, image: Image.Image, page_number: int) -> Page:
         self.pages_attempted += 1
         try:
-            raw_blocks = self.engine.recognize(image, self._languages)
+            raw_blocks = self._recognize(image)
         except AppError as error:
             if error.code in FATAL_PAGE_ERROR_CODES or error.code == "ENGINE_UNAVAILABLE":
                 raise
@@ -105,16 +121,36 @@ class _OcrSession:
             tables=[],
         )
 
+    def _recognize(self, image: Image.Image) -> list[OcrBlock]:
+        if self._languages:
+            return self._run_engine(image, self._languages)
+        probe_languages = self.engine.detection_languages()
+        raw_blocks = self._run_engine(image, probe_languages)
+        detected = detect_languages("\n".join(block.text for block in raw_blocks))
+        usable = [language for language in detected if language in self.engine.supported_languages]
+        if usable and self.engine.needs_reread(probe_languages, usable):
+            self._languages = usable
+            raw_blocks = self._run_engine(image, usable)
+        return raw_blocks
+
+    def _run_engine(self, image: Image.Image, languages: list[str]) -> list[OcrBlock]:
+        """Runs OCR on a worker thread so a slow page or model download cannot outlive the processing deadline."""
+        future = self._processor.page_workers.submit(self.engine.recognize, image, languages)
+        try:
+            return future.result(timeout=max(self._deadline - time.monotonic(), 0))
+        except FuturesTimeoutError:
+            future.cancel()
+            raise AppError("TIMEOUT", "Processing exceeded the configured time limit.", 504) from None
+
+
+def _clamp(value: float) -> float:
+    return round(min(max(value, 0.0), 1.0), 4)
+
 
 def _normalized_block(block: OcrBlock, image_size: tuple[int, int]) -> Block:
     width, height = image_size
     x_min, y_min, x_max, y_max = block.bbox
-    bbox = [
-        round(min(max(x_min / width, 0.0), 1.0), 4),
-        round(min(max(y_min / height, 0.0), 1.0), 4),
-        round(min(max(x_max / width, 0.0), 1.0), 4),
-        round(min(max(y_max / height, 0.0), 1.0), 4),
-    ]
+    bbox = [_clamp(x_min / width), _clamp(y_min / height), _clamp(x_max / width), _clamp(y_max / height)]
     confidence = None if block.confidence is None else round(block.confidence, 4)
     return Block(text=block.text, confidence=confidence, bbox=bbox)
 
@@ -125,6 +161,8 @@ class DocumentProcessor:
     def __init__(self, settings: Settings, engines: dict[str, OcrEngine]):
         self._settings = settings
         self._engines = engines
+        # One worker per synchronous request plus the job worker; a timed-out page keeps its thread until it ends.
+        self.page_workers = ThreadPoolExecutor(max_workers=settings.sync_max_active + 2, thread_name_prefix="ocr-page")
 
     def engines_info(self) -> EnginesResponse:
         infos = []
@@ -146,7 +184,7 @@ class DocumentProcessor:
             )
         return EnginesResponse(
             engines=infos,
-            language_detection=False,
+            language_detection=True,
             native_extraction=["pdf", "docx", "txt"],
             supported_formats=SUPPORTED_FORMAT_LABELS,
         )
@@ -194,7 +232,7 @@ class DocumentProcessor:
         doc_format = detect_format(path, self._settings.max_docx_uncompressed_mb * 1024 * 1024)
         deadline = started + self._settings.processing_timeout_seconds
         warnings: list[str] = []
-        session = _OcrSession(self, options, languages, warnings)
+        session = _OcrSession(self, options, languages, warnings, deadline)
 
         if doc_format in IMAGE_FORMATS:
             pages = self._process_image(path, options, session, deadline, progress)
@@ -207,6 +245,7 @@ class DocumentProcessor:
             raise AppError("OCR_FAILED", f"OCR failed on every page. {session.last_error.message}", 500)
 
         methods = {page.method for page in pages}
+        detected_languages = None if languages else _document_languages(pages)
         result = ExtractionResult(
             document=DocumentInfo(
                 filename=filename,
@@ -220,16 +259,18 @@ class DocumentProcessor:
                 requested_mode=options.mode,
                 mode=methods.pop() if len(methods) == 1 else "mixed",
                 requested_languages=languages,
+                detected_languages=detected_languages,
             ),
             pages=pages,
             warnings=warnings,
         )
         logger.info(
-            "Processed document: format=%s pages=%d mode=%s engine=%s seconds=%.1f",
+            "Processed document: format=%s pages=%d mode=%s engine=%s detected_languages=%s seconds=%.1f",
             doc_format.value,
             len(pages),
             result.extraction.mode,
             result.extraction.engine,
+            detected_languages,
             time.monotonic() - started,
         )
         return result
@@ -264,18 +305,24 @@ class DocumentProcessor:
         document = pdf_service.open_pdf(path, self._settings)
         try:
             total = document.page_count
-            if options.mode == Mode.ocr:
+            native_pages = [pdf_service.native_page_blocks(document, index) for index in range(total)]
+            native_texts = ["\n".join(text for text, _ in blocks) for blocks in native_pages]
+            needs_ocr = [
+                options.mode == Mode.ocr
+                or (options.mode == Mode.auto and len(text.strip()) < self._settings.native_min_chars)
+                for text in native_texts
+            ]
+            if any(needs_ocr):
                 session.ensure_engine()
             pages = []
             for index in range(total):
                 self._check_deadline(deadline)
                 _report(progress, index, total)
                 page_number = index + 1
-                native_blocks = pdf_service.native_page_blocks(document, index)
-                native_text = "\n".join(text for text, _ in native_blocks)
-                has_enough_text = len(native_text.strip()) >= self._settings.native_min_chars
+                native_blocks = native_pages[index]
+                native_text = native_texts[index]
 
-                if options.mode == Mode.native or (options.mode == Mode.auto and has_enough_text):
+                if not needs_ocr[index]:
                     if not native_text:
                         warnings.append(f"Page {page_number} has no embedded text. Use mode 'auto' or 'ocr' to read it.")
                     pages.append(
@@ -283,7 +330,7 @@ class DocumentProcessor:
                             page_number=page_number,
                             method="native",
                             text=native_text,
-                            blocks=[Block(text=text, confidence=None, bbox=[round(v, 4) for v in bbox]) for text, bbox in native_blocks],
+                            blocks=[Block(text=text, confidence=None, bbox=[_clamp(v) for v in bbox]) for text, bbox in native_blocks],
                             tables=[],
                         )
                     )
@@ -315,6 +362,14 @@ class DocumentProcessor:
     def _check_deadline(deadline: float) -> None:
         if time.monotonic() > deadline:
             raise AppError("TIMEOUT", "Processing exceeded the configured time limit.", 504)
+
+
+def _document_languages(pages: list[Page]) -> list[str]:
+    """Languages detected page by page, the language covering the most letters first."""
+    totals: Counter[str] = Counter()
+    for page in pages:
+        totals.update(language_letter_counts(page.text))
+    return [code for code, _ in totals.most_common()]
 
 
 def _report(progress: ProgressCallback | None, done: int, total: int) -> None:

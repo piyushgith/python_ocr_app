@@ -37,6 +37,8 @@ IMAGE_FORMATS = {DocFormat.png, DocFormat.jpeg, DocFormat.tiff, DocFormat.bmp, D
 
 SUPPORTED_FORMAT_LABELS = ["png", "jpg/jpeg", "tiff", "bmp", "webp", "pdf", "docx", "txt"]
 
+BMP_DIB_HEADER_SIZES = {12, 40, 52, 56, 64, 108, 124}
+
 _UNSAFE_FILENAME_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -74,16 +76,19 @@ def detect_format(path: Path, max_docx_uncompressed_bytes: int) -> DocFormat:
         return DocFormat.jpeg
     if header.startswith((b"II*\x00", b"MM\x00*")):
         return DocFormat.tiff
-    if header.startswith(b"BM"):
+    if header.startswith(b"BM") and int.from_bytes(header[14:18], "little") in BMP_DIB_HEADER_SIZES:
         return DocFormat.bmp
     if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         return DocFormat.webp
-    if b"%PDF-" in header:
+    if header.removeprefix(b"\xef\xbb\xbf").lstrip().startswith(b"%PDF-"):
         return DocFormat.pdf
     if header.startswith(b"PK\x03\x04"):
         return _check_docx(path, max_docx_uncompressed_bytes)
     if _is_utf8_text(path, header):
         return DocFormat.txt
+    # Readers accept a PDF header anywhere in the first 1 KB; text that merely quotes it was matched above.
+    if b"%PDF-" in header:
+        return DocFormat.pdf
     raise unsupported_format(
         "Unsupported file type. Supported: " + ", ".join(SUPPORTED_FORMAT_LABELS) + "."
     )

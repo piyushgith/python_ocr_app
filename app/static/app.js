@@ -86,10 +86,6 @@
   async function extract() {
     if (!state.file || state.running) return;
     const languages = selectedLanguages();
-    if (languages.length === 0) {
-      showError("INVALID_REQUEST", "Select at least one language.");
-      return;
-    }
     clearResults();
     state.running = true;
     el.extract.disabled = true;
@@ -184,9 +180,12 @@
     }
 
     const engine = extraction.engine || "none (native text only)";
+    const languages = extraction.detected_languages
+      ? `detected: ${extraction.detected_languages.join(", ") || "unknown"}`
+      : extraction.requested_languages.join(", ");
     el.summary.textContent =
       `${doc.content_type} · ${doc.page_count} page(s) · mode: ${extraction.mode} · engine: ${engine} · ` +
-      `languages: ${extraction.requested_languages.join(", ")}`;
+      `languages: ${languages}`;
 
     el.jsonView.textContent = JSON.stringify(state.result, null, 2);
     renderPagesTab();

@@ -23,7 +23,7 @@ class OutputFormat(str, Enum):
 
 class ExtractionOptions(BaseModel):
     engine: EngineChoice = EngineChoice.auto
-    languages: list[str] = ["en"]
+    languages: list[str] = []
     mode: Mode = Mode.auto
 
 
@@ -39,9 +39,11 @@ class ExtractionInfo(BaseModel):
     requested_engine: EngineChoice
     requested_mode: Mode
     mode: Literal["native", "ocr", "mixed"] = Field(description="How the pages were actually extracted")
-    requested_languages: list[str]
+    requested_languages: list[str] = Field(description="Languages named in the request. Empty when left to detection")
     detected_languages: list[str] | None = Field(
-        default=None, description="Always null: automatic language detection is not available"
+        default=None,
+        description="Languages detected in the extracted text, most used first, when the request named none. "
+        "Empty when the text was too short to tell. null when languages were requested",
     )
 
 

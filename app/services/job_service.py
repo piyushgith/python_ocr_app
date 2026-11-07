@@ -33,7 +33,10 @@ class Job:
 
 
 class JobStore:
-    """Runs extraction jobs one at a time on a background thread. Jobs live in memory and expire after job_ttl_seconds."""
+    """Runs extraction jobs one at a time on a background thread. Jobs live in memory and expire after job_ttl_seconds.
+
+    At most job_max_stored jobs are kept; when full, the oldest finished job is dropped to make room.
+    """
 
     def __init__(self, processor: DocumentProcessor, settings: Settings):
         self._processor = processor
@@ -49,6 +52,8 @@ class JobStore:
             active = sum(1 for job in self._jobs.values() if job.status in ("queued", "processing"))
             if active >= self._settings.job_max_active:
                 raise AppError("TOO_MANY_JOBS", "Too many jobs are queued. Retry later.", 429)
+            if len(self._jobs) >= self._settings.job_max_stored:
+                self._drop_oldest_finished()
             job = Job(
                 job_id=str(uuid.uuid4()),
                 workdir=workdir,
@@ -56,8 +61,8 @@ class JobStore:
                 options=options,
                 created_at=datetime.now(timezone.utc),
             )
+            self._executor.submit(self._run, job)
             self._jobs[job.job_id] = job
-        self._executor.submit(self._run, job)
         return job.job_id
 
     def get(self, job_id: str) -> Job:
@@ -96,6 +101,10 @@ class JobStore:
             with job._lock:
                 job.pages_done, job.total_pages = done, total
 
+        outcome = {
+            "status": "failed",
+            "error": ErrorBody(code="INTERNAL_ERROR", message="Unexpected error while processing the document."),
+        }
         try:
             result = self._processor.process(job.workdir / "upload.bin", job.filename, job.options, report_progress)
             outcome = {"status": "completed", "result": result}
@@ -103,17 +112,20 @@ class JobStore:
             outcome = {"status": "failed", "error": ErrorBody(code=error.code, message=error.message)}
         except Exception:
             logger.exception("Job %s failed unexpectedly", job.job_id)
-            outcome = {
-                "status": "failed",
-                "error": ErrorBody(code="INTERNAL_ERROR", message="Unexpected error while processing the document."),
-            }
         finally:
             shutil.rmtree(job.workdir, ignore_errors=True)
+            with job._lock:
+                job.finished_at = datetime.now(timezone.utc)
+                for key, value in outcome.items():
+                    setattr(job, key, value)
+            with self._lock:
+                self._purge_expired()
 
-        with job._lock:
-            job.finished_at = datetime.now(timezone.utc)
-            for key, value in outcome.items():
-                setattr(job, key, value)
+    def _drop_oldest_finished(self) -> None:
+        finished = [job for job in self._jobs.values() if job.finished_at]
+        if finished:
+            oldest = min(finished, key=lambda job: job.finished_at)
+            del self._jobs[oldest.job_id]
 
     def _purge_expired(self) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._settings.job_ttl_seconds)

@@ -6,6 +6,7 @@ from app.core.errors import AppError
 from app.extractors.paddleocr_extractor import PaddleOcrEngine
 from app.extractors.tesseract_extractor import TesseractEngine, parse_tsv
 from app.services.document_service import normalize_languages
+from app.services.language_service import detect_languages
 from app.utils.files import DocFormat, detect_format, sanitize_filename
 
 LIMIT = 100 * 1024 * 1024
@@ -36,13 +37,29 @@ def test_extension_is_ignored(tmp_path, samples):
         (b"\xff\xd8\xff\xe0" + b"0" * 20, DocFormat.jpeg),
         (b"II*\x00" + b"0" * 20, DocFormat.tiff),
         (b"MM\x00*" + b"0" * 20, DocFormat.tiff),
-        (b"BM" + b"0" * 20, DocFormat.bmp),
+        (b"BM" + b"0" * 12 + (40).to_bytes(4, "little") + b"0" * 20, DocFormat.bmp),
         (b"RIFF\x00\x00\x00\x00WEBPVP8 ", DocFormat.webp),
     ],
 )
 def test_detects_other_image_signatures(tmp_path, header, expected):
     path = tmp_path / "f.bin"
     path.write_bytes(header)
+
+    assert detect_format(path, LIMIT) == expected
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        (b"BMW report for the fleet, quarter three.", DocFormat.txt),
+        (b"Note: a PDF file starts with %PDF-1.7 followed by objects.", DocFormat.txt),
+        (b"\xef\xbb\xbf  %PDF-1.7\n", DocFormat.pdf),
+        (b"junk before header\xff\xfe\n%PDF-1.7\n", DocFormat.pdf),
+    ],
+)
+def test_text_resembling_bmp_or_pdf_is_not_misdetected(tmp_path, content, expected):
+    path = tmp_path / "f.bin"
+    path.write_bytes(content)
 
     assert detect_format(path, LIMIT) == expected
 
@@ -97,7 +114,7 @@ def test_filename_is_reduced_to_a_safe_base_name(raw, expected):
 @pytest.mark.parametrize(
     "requested, expected",
     [
-        ([], ["en"]),
+        ([], []),
         (["en,fr"], ["en", "fr"]),
         (["FR", "fr", " ar "], ["fr", "ar"]),
     ],
@@ -157,3 +174,36 @@ def test_missing_tesseract_binary_gives_install_instructions():
 
     assert "apt install tesseract-ocr" in engine.problems()[0]
     assert engine.supported_languages == frozenset()
+
+
+def test_failed_tesseract_language_lookup_is_retried(monkeypatch):
+    engine = TesseractEngine()
+    answers = iter([frozenset(), frozenset({"eng", "fra"})])
+    monkeypatch.setattr(engine, "_list_installed_codes", lambda: next(answers))
+
+    assert engine.supported_languages == frozenset()
+    assert engine.supported_languages == frozenset({"en", "fr"})
+    assert engine.supported_languages == frozenset({"en", "fr"})
+
+
+def test_paddle_rereads_only_when_detection_selects_another_model(tmp_path):
+    engine = PaddleOcrEngine(tmp_path)
+
+    assert engine.detection_languages() == ["ar"]
+    assert engine.needs_reread(["ar"], ["fr"]) is True
+    assert engine.needs_reread(["ar"], ["ar", "en"]) is False
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("First paragraph of the loan agreement between the bank and the customer.", ["en"]),
+        ("Relevé de compte: échéance du prêt le 15 février, merci de votre confiance.", ["fr"]),
+        ("مرحبا بكم في البنك الوطني، كشف الحساب الشهري", ["ar"]),
+        ("كشف الحساب الشهري للعميل في البنك الوطني Monthly statement of the account", ["ar", "en"]),
+        ("FAKE OCR TEXT", []),
+        ("12345 67890 ---", []),
+    ],
+)
+def test_language_detection(text, expected):
+    assert detect_languages(text) == expected

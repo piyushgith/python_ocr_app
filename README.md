@@ -91,7 +91,7 @@ Format is detected from file content, not from the extension or client content t
 | English, French | `en`, `fr` | PP-OCRv6 medium detector + PP-OCRv6 medium recognizer (Latin script; accents verified) |
 | Arabic | `ar` | PP-OCRv6 medium detector + `arabic_PP-OCRv5_mobile_rec` |
 
-PaddleOCR loads **one recognition model per request**. A request containing `ar` uses the Arabic model, which also reads Latin letters and digits (verified on English text, see test results). Automatic language detection is **not available**; select the languages in the document. `detected_languages` in the JSON is always `null`.
+PaddleOCR loads **one recognition model per request**. A request containing `ar` uses the Arabic model, which also reads Latin letters and digits (verified on English text, see test results). **Omit `languages` to detect them.** Detection uses Unicode script for Arabic and [lingua](https://github.com/pemistahl/lingua-py) for English vs French. The result is `extraction.detected_languages`, with the language covering the most text first. It is `[]` when the text is too short to tell (under 20 letters) and `null` when `languages` was sent. For OCR, PaddleOCR reads the first page with the Arabic model, which reads both scripts. If the detected language needs the Latin model, it re-reads that page with it and uses it for later pages. This costs one extra page pass. Tesseract reads every page with all installed languages.
 
 ## Processing modes
 
@@ -189,10 +189,12 @@ Configuration: copy `.env.example` to `.env` (all values shown are defaults, eac
 | `OCR_MAX_IMAGE_SIDE` | 4000 | Longer side is downscaled to this (pixels) |
 | `OCR_MAX_IMAGE_PIXELS` | 100000000 | Larger images are rejected |
 | `OCR_PADDLE_DET_MAX_SIDE` | 1280 | Longest side the text detector sees. Lower = less memory and time, may miss small text |
-| `OCR_PROCESSING_TIMEOUT_SECONDS` | 600 | Per document; checked between pages |
+| `OCR_PROCESSING_TIMEOUT_SECONDS` | 600 | Per document, including first-use model download. A page still running at the limit returns 504 |
 | `OCR_BATCH_MAX_FILES` | 5 | Files per `/batch` request |
+| `OCR_SYNC_MAX_ACTIVE` | 10 | Concurrent `/extract` + `/batch` requests before 429 |
 | `OCR_JOB_TTL_SECONDS` | 3600 | How long finished jobs stay available |
 | `OCR_JOB_MAX_ACTIVE` | 20 | Queued + running jobs before 429 |
+| `OCR_JOB_MAX_STORED` | 100 | Jobs kept in memory; when full, the oldest finished job is dropped |
 | `OCR_MODEL_CACHE_DIR` | `models` | PaddleOCR model cache |
 | `OCR_CORS_ORIGINS` | `[]` | JSON list of allowed origins. Empty = same-origin only |
 
@@ -226,7 +228,7 @@ curl -s -F files=@samples/english.png -F files=@samples/document.docx -F languag
      http://127.0.0.1:8000/api/v1/ocr/batch
 ```
 
-Form fields: `engine` (`auto|paddleocr|tesseract`), `languages` (repeat the field or comma-separate), `mode` (`auto|native|ocr`), `output_format` (`json|text`, extract only). The batch endpoint always returns JSON, with one `completed` or `failed` item per file.
+Form fields: `engine` (`auto|paddleocr|tesseract`), `languages` (repeat the field or comma-separate; omit to detect), `mode` (`auto|native|ocr`), `output_format` (`json|text`, extract only). The batch endpoint always returns JSON, with one `completed` or `failed` item per file.
 
 Other endpoints: `GET /health`, `GET /api/v1/ocr/engines`.
 
@@ -360,11 +362,12 @@ Apple M4 Pro, 14 cores, CPU only, models cached, peak RSS of the Python process:
 
 - Paddle CPU inference is slow and single-threaded on Apple Silicon (see above); the job queue runs one document at a time.
 - Mixed Arabic/Latin lines: wrong order and occasional character errors (measured). Complex Arabic layouts and reading order are untested.
-- No automatic language detection. Requests with `ar` use the Arabic model for all text.
+- Requests with `ar` use the Arabic model for all text. With detection, PaddleOCR keeps the Latin model once a page is detected as English/French, so a later Arabic-only page in the same document is misread.
+- Language detection needs about 20 letters per page; English vs French on very short text can be wrong.
 - Rotated or skewed scans are not corrected (document orientation and unwarping are off for speed). Rotated PDF pages are untested.
 - DOC and RTF are not supported. TXT must be UTF-8.
 - DOCX: headers, footers, text boxes and nested tables are not extracted. PDF tables are not extracted (only DOCX tables).
-- Timeouts are checked between pages; a single very slow page cannot be interrupted.
+- A page that times out returns 504, but its OCR thread runs to completion in the background (Python threads cannot be killed) and holds the PaddleOCR lock until then.
 - Starlette spools a multipart upload before the size check runs. A `Content-Length` guard rejects oversized declared requests, but a client that omits it is only stopped after the upload is received. Enforce limits in a reverse proxy.
 - Tesseract was tested only on macOS with the three clean fixtures. Docker build and Linux install were not run. The browser UI was not tried in a browser.
 

@@ -1,4 +1,5 @@
 import logging
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -55,11 +56,7 @@ def create_app(settings: Settings | None = None, engines: dict[str, OcrEngine] |
     app.state.settings = settings
     app.state.processor = processor
     app.state.jobs = jobs
-
-    if settings.cors_origins:
-        app.add_middleware(
-            CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["GET", "POST"], allow_headers=["*"]
-        )
+    app.state.sync_slots = threading.BoundedSemaphore(settings.sync_max_active)
 
     @app.middleware("http")
     async def reject_oversized_uploads(request: Request, call_next):
@@ -70,6 +67,12 @@ def create_app(settings: Settings | None = None, engines: dict[str, OcrEngine] |
             if declared.isdigit() and int(declared) > limit:
                 return _error_response(413, "FILE_TOO_LARGE", f"Request exceeds the {settings.max_upload_mb} MB upload limit.")
         return await call_next(request)
+
+    # Added last so it is the outermost middleware and its headers also reach the 413 above.
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["GET", "POST"], allow_headers=["*"]
+        )
 
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, error: AppError):

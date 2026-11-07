@@ -2,7 +2,6 @@ import logging
 import shutil
 import subprocess
 import tempfile
-from functools import cached_property
 from pathlib import Path
 
 from PIL import Image
@@ -24,9 +23,16 @@ class TesseractEngine(OcrEngine):
 
     def __init__(self, command: str = "tesseract"):
         self._command = command
+        self._cached_codes: frozenset[str] = frozenset()
 
-    @cached_property
+    @property
     def _installed_codes(self) -> frozenset[str]:
+        """Installed traineddata codes. Only a non-empty answer is cached, so a failed lookup is retried."""
+        if not self._cached_codes:
+            self._cached_codes = self._list_installed_codes()
+        return self._cached_codes
+
+    def _list_installed_codes(self) -> frozenset[str]:
         if shutil.which(self._command) is None:
             return frozenset()
         try:
@@ -39,7 +45,8 @@ class TesseractEngine(OcrEngine):
 
     @property
     def supported_languages(self) -> frozenset[str]:
-        return frozenset(code for code, tesseract_code in TESSERACT_CODES.items() if tesseract_code in self._installed_codes)
+        installed = self._installed_codes
+        return frozenset(code for code, tesseract_code in TESSERACT_CODES.items() if tesseract_code in installed)
 
     def problems(self) -> list[str]:
         if shutil.which(self._command) is None:
@@ -53,6 +60,9 @@ class TesseractEngine(OcrEngine):
                 "Install traineddata files (Debian/Ubuntu: apt install tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-ara)."
             ]
         return []
+
+    def detection_languages(self) -> list[str]:
+        return [code for code in TESSERACT_CODES if code in self.supported_languages]
 
     def recognize(self, image: Image.Image, languages: list[str]) -> list[OcrBlock]:
         codes = "+".join(TESSERACT_CODES[language] for language in languages)
